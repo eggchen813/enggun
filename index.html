@@ -1,0 +1,819 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Micro:bit 體感射擊遊戲</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* 遊戲區域背景與特效 */
+        .game-bg {
+            background-color: #0f172a;
+            background-image: 
+                linear-gradient(rgba(30, 41, 59, 0.5) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(30, 41, 59, 0.5) 1px, transparent 1px);
+            background-size: 40px 40px;
+        }
+        
+        /* 準心樣式 */
+        #crosshair {
+            transition: transform 0.05s linear; /* 讓移動平滑一點 */
+            pointer-events: none; /* 讓點擊穿透準心，判定在後方的標靶 */
+        }
+        
+        /* 標靶動畫 */
+        .target {
+            animation: popIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+            transition: transform 0.1s;
+        }
+        .target:active {
+            transform: scale(0.9);
+        }
+        @keyframes popIn {
+            0% { transform: scale(0); opacity: 0; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+
+        /* 擊中特效 */
+        .hit-effect {
+            position: absolute;
+            width: 40px;
+            height: 40px;
+            background: radial-gradient(circle, rgba(239,68,68,1) 0%, rgba(239,68,68,0) 70%);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            animation: explode 0.3s ease-out forwards;
+            pointer-events: none;
+        }
+        @keyframes explode {
+            0% { transform: translate(-50%, -50%) scale(0.5); opacity: 1; }
+            100% { transform: translate(-50%, -50%) scale(2); opacity: 0; }
+        }
+
+        /* 射擊(開火)特效 - 槍口火焰/光環 */
+        .shoot-effect {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            background: radial-gradient(circle, rgba(253, 224, 71, 1) 0%, rgba(250, 204, 21, 0) 80%);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            animation: flash 0.15s ease-out forwards;
+            pointer-events: none;
+            z-index: 45; /* 在準心下方，但在標靶上方 */
+        }
+        @keyframes flash {
+            0% { transform: translate(-50%, -50%) scale(0.1); opacity: 1; }
+            50% { transform: translate(-50%, -50%) scale(1.5); opacity: 0.8; }
+            100% { transform: translate(-50%, -50%) scale(0.1); opacity: 0; }
+        }
+
+
+        /* 單字射擊模式 */
+        .letter-target {
+            width: 64px;
+            height: 64px;
+            border-radius: 18px;
+            background: linear-gradient(145deg, #2563eb, #7c3aed);
+            border: 3px solid rgba(255,255,255,.75);
+            box-shadow: 0 0 20px rgba(59,130,246,.45), inset 0 0 10px rgba(255,255,255,.15);
+            font-size: 32px;
+            line-height: 1;
+            text-transform: uppercase;
+            user-select: none;
+        }
+        .letter-target.used {
+            opacity: .22;
+            transform: scale(.85);
+            pointer-events: none;
+            filter: grayscale(1);
+        }
+        .answer-slot {
+            width: 44px;
+            height: 52px;
+            border-bottom: 4px solid #60a5fa;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 30px;
+            font-weight: 900;
+            text-transform: uppercase;
+        }
+        .word-panel {
+            min-height: 180px;
+        }
+        @media (max-width: 767px) {
+            .letter-target { width: 54px; height: 54px; font-size: 27px; border-radius: 15px; }
+        }
+
+        @media (max-width: 767px) {
+            .word-panel { min-height: 76px; max-height: 92px; }
+            .answer-slot { width: 34px; height: 38px; font-size: 23px; border-bottom-width: 3px; }
+            #crosshair { width: 40px !important; height: 40px !important; }
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 h-[100dvh] flex flex-col items-center py-2 px-2 md:py-4 md:px-4 font-sans selection:bg-blue-500 selection:text-white overflow-hidden">
+
+    <!-- 頂部控制與狀態區 -->
+    <div class="w-full max-w-7xl flex flex-row justify-between items-center mb-2 gap-2">
+        <div>
+            <h1 class="text-xl md:text-3xl font-extrabold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-red-500 to-orange-400">
+                Micro:bit 體感射擊
+            </h1>
+            <p class="text-gray-400 text-[10px] md:text-sm hidden sm:block">Yaw=左右瞄準, Pitch=上下瞄準, 按鈕=開火</p>
+        </div>
+        
+        <div class="flex items-center gap-1 md:gap-3 bg-gray-800 p-1.5 md:p-2 rounded-xl border border-gray-700 shadow-lg">
+            <button id="connectBtn" class="bg-blue-600 hover:bg-blue-500 text-white font-bold py-1.5 px-2 md:py-2 md:px-4 rounded-lg transition-colors text-xs md:text-sm">
+                連線槍枝 (Micro:bit)
+            </button>
+            <button id="disconnectBtn" class="bg-red-600 hover:bg-red-500 text-white font-bold py-1.5 px-2 md:py-2 md:px-4 rounded-lg transition-colors text-xs md:text-sm hidden">
+                斷開連線
+            </button>
+            <button id="calibrateBtn" class="bg-yellow-600 hover:bg-yellow-500 text-white font-bold py-1.5 px-2 md:py-2 md:px-4 rounded-lg transition-colors text-xs md:text-sm disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                準心校正 (置中)
+            </button>
+            <div class="hidden sm:flex flex-col text-left pl-3 border-l border-gray-600 min-w-[110px]">
+                <span class="text-xs text-gray-400">連線狀態：</span>
+                <span id="statusText" class="font-bold text-gray-500 text-sm truncate">等待連線...</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- 遊戲資訊列 -->
+    <div class="w-full max-w-7xl flex justify-between items-center mb-1 px-1 md:px-4">
+        <div class="text-lg md:text-2xl font-mono font-bold text-emerald-400">
+            SCORE: <span id="scoreDisplay">0</span>
+        </div>
+        <div class="hidden sm:flex text-xs md:text-sm text-gray-400 space-x-2 md:space-x-4">
+            <span>原始 Yaw: <span id="rawYawDisplay">0</span>°</span>
+            <span>原始 Pitch: <span id="rawPitchDisplay">0</span>°</span>
+        </div>
+    </div>
+
+    <!-- 遊戲主畫面：左側射擊區 + 右側單字提示 -->
+    <div class="w-full max-w-7xl flex-1 min-h-0 flex flex-col md:flex-row gap-2 md:gap-4 items-stretch">
+    <div id="gameArea" class="game-bg relative flex-1 min-h-0 h-auto rounded-2xl border-4 border-gray-700 shadow-[0_0_30px_rgba(0,0,0,0.5)] overflow-hidden">
+        
+        <!-- 尚未校正的提示蓋板 -->
+        <div id="calibrationOverlay" class="absolute inset-0 bg-gray-900/80 flex flex-col items-center justify-center z-50 hidden">
+            <div class="text-white text-xl font-bold mb-4">請將 Micro:bit 對準螢幕正中央</div>
+            <div class="text-gray-300 mb-6">按下上方的「準心校正」按鈕開始遊戲</div>
+            <div class="animate-bounce text-5xl">🎯</div>
+        </div>
+
+        <!-- 準心 (Crosshair) -->
+        <div id="crosshair" class="absolute top-1/2 left-1/2 w-12 h-12 -mt-6 -ml-6 z-40 hidden">
+            <!-- 準心圖形 -->
+            <div class="relative w-full h-full">
+                <div class="absolute top-0 bottom-0 left-1/2 w-0.5 bg-green-400 transform -translate-x-1/2"></div>
+                <div class="absolute left-0 right-0 top-1/2 h-0.5 bg-green-400 transform -translate-y-1/2"></div>
+                <div class="absolute inset-0 border-2 border-green-400 rounded-full"></div>
+                <div class="absolute top-1/2 left-1/2 w-1 h-1 bg-red-500 rounded-full transform -translate-x-1/2 -translate-y-1/2"></div>
+            </div>
+        </div>
+
+        <!-- 六個英文字母會透過 JS 動態產生於此 -->
+    </div>
+
+    <aside class="word-panel md:w-64 bg-gray-800 border border-gray-700 rounded-2xl px-4 py-2 md:p-5 shadow-xl flex md:flex-col items-center md:items-stretch justify-center gap-3 md:gap-2 shrink-0">
+        <div class="flex md:block items-baseline gap-2 shrink-0">
+            <div id="meaningDisplay" class="text-2xl md:text-3xl font-black text-amber-300">準備中</div>
+            <div id="englishDisplay" class="hidden">---</div>
+        </div>
+        <div id="answerSlots" class="flex gap-2 md:gap-3 min-h-[42px] md:min-h-[52px] items-center"></div>
+        <!-- 保留給程式使用，但手機介面不顯示 -->
+        <span id="letterCountDisplay" class="hidden">0</span>
+        <div id="wordMessage" class="hidden"></div>
+        <button id="repeatWordBtn" class="hidden" aria-hidden="true"></button>
+    </aside>
+    </div>
+
+    <script>
+        // --- 藍牙設定 ---
+        const UART_SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+        const UART_TX_CHARACTERISTIC_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+
+        let bluetoothDevice;
+        let dataBuffer = "";
+
+        // --- 遊戲邏輯與狀態變數 ---
+        let score = 0;
+        let isGameRunning = false;
+
+        // --- 單字射擊模式 ---
+        // 全部單字都少於 4 個英文字母，方便做 2~3 格的射擊拼字。
+        const WORD_BANK = [
+            { word: 'CAT', meaning: '貓' },
+            { word: 'DOG', meaning: '狗' },
+            { word: 'SUN', meaning: '太陽' },
+            { word: 'PEN', meaning: '筆' },
+            { word: 'RED', meaning: '紅色' },
+            { word: 'BED', meaning: '床' },
+            { word: 'PIG', meaning: '豬' },
+            { word: 'CUP', meaning: '杯子' },
+            { word: 'MAP', meaning: '地圖' },
+            { word: 'BUS', meaning: '公車' },
+            { word: 'CAR', meaning: '汽車' },
+            { word: 'ANT', meaning: '螞蟻' },
+            { word: 'UP', meaning: '上' },
+            { word: 'GO', meaning: '去' },
+            { word: 'NO', meaning: '不／不是' }
+        ];
+        let currentWord = null;
+        let currentChoices = [];
+        let enteredLetters = [];
+        let roundLocked = false;
+        
+        // 原始感測器資料
+        let rawYaw = 0;
+        let rawPitch = 0;
+        let lastButtonState = 0;
+
+        // 平滑化處理 (低通濾波) 的變數
+        let smoothedYaw = 0;
+        let smoothedPitch = 0;
+        const FILTER_ALPHA = 0.25;
+        // 校正基準點 (代表螢幕中心的角度)
+        let baseYaw = 0;
+        let basePitch = 0;
+        let isCalibrated = false;
+
+        // 靈敏度設定 (角度變換 -> 像素移動)
+        // 您可以根據實際手感調整這些數值
+        const SENSITIVITY_X = 15; // 數值越大，左右轉動時游標動越快
+        const SENSITIVITY_Y = 15; // 數值越大，上下轉動時游標動越快
+        const INVERT_PITCH = true; // 是否反轉上下 (通常板子往前傾 pitch 變小/負，游標應該往下)
+
+        // 準心目標位置與當前渲染位置 (用於插值平滑移動)
+        let targetCrosshairX = 0;
+        let targetCrosshairY = 0;
+        let crosshairX = 0;
+        let crosshairY = 0;
+
+        // 動畫 Frame ID
+        let animationFrameId;
+
+        // 音效系統
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        
+        // --- 單字語音：先念中文提示，再念英文單字，例如「太陽，sun」 ---
+        function speakCurrentWord() {
+            if (!currentWord || !('speechSynthesis' in window)) return;
+
+            window.speechSynthesis.cancel();
+
+            const zh = new SpeechSynthesisUtterance(currentWord.meaning);
+            zh.lang = 'zh-TW';
+            zh.rate = 0.9;
+            zh.pitch = 1;
+
+            const en = new SpeechSynthesisUtterance(currentWord.word.toLowerCase());
+            en.lang = 'en-US';
+            en.rate = 0.75;
+            en.pitch = 1;
+
+            zh.onend = () => {
+                setTimeout(() => window.speechSynthesis.speak(en), 120);
+            };
+            window.speechSynthesis.speak(zh);
+        }
+
+        // 答對後：再念一次「中文 + 英文」，接著用英文給一句隨機鼓勵
+        function speakSuccessAndEncourage(onFinished) {
+            if (!currentWord || !('speechSynthesis' in window)) {
+                if (onFinished) onFinished();
+                return;
+            }
+
+            window.speechSynthesis.cancel();
+
+            const encouragements = [
+                'Great job!',
+                'Excellent!',
+                'Well done!',
+                'Awesome!',
+                'You got it!',
+                'Perfect! Keep going!',
+                'Fantastic!'
+            ];
+            const encouragement = encouragements[Math.floor(Math.random() * encouragements.length)];
+
+            const zh = new SpeechSynthesisUtterance(currentWord.meaning);
+            zh.lang = 'zh-TW';
+            zh.rate = 0.9;
+            zh.pitch = 1;
+
+            const en = new SpeechSynthesisUtterance(currentWord.word.toLowerCase());
+            en.lang = 'en-US';
+            en.rate = 0.75;
+            en.pitch = 1;
+
+            const praise = new SpeechSynthesisUtterance(encouragement);
+            praise.lang = 'en-US';
+            praise.rate = 0.95;
+            praise.pitch = 1.08;
+            praise.onend = () => {
+                if (onFinished) setTimeout(onFinished, 250);
+            };
+
+            zh.onend = () => setTimeout(() => window.speechSynthesis.speak(en), 100);
+            en.onend = () => setTimeout(() => window.speechSynthesis.speak(praise), 140);
+            window.speechSynthesis.speak(zh);
+        }
+
+        function playShootSound() {
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+
+            oscillator.type = 'square';
+            oscillator.frequency.setValueAtTime(440, audioCtx.currentTime); // 440 Hz
+            oscillator.frequency.exponentialRampToValueAtTime(110, audioCtx.currentTime + 0.1); // 快速降頻產生「咻」的感覺
+
+            gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime); // 初始音量
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1); // 快速淡出
+
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+
+            oscillator.start();
+            oscillator.stop(audioCtx.currentTime + 0.1);
+        }
+
+
+        function playErrorSound() {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            const now = audioCtx.currentTime;
+            [220, 165].forEach((freq, i) => {
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(freq, now + i * 0.13);
+                gain.gain.setValueAtTime(0.22, now + i * 0.13);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + i * 0.13 + 0.12);
+                osc.connect(gain); gain.connect(audioCtx.destination);
+                osc.start(now + i * 0.13); osc.stop(now + i * 0.13 + 0.12);
+            });
+        }
+
+        function playSuccessSound() {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            const now = audioCtx.currentTime;
+            [523, 659, 784].forEach((freq, i) => {
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(freq, now + i * 0.09);
+                gain.gain.setValueAtTime(0.18, now + i * 0.09);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + i * 0.09 + 0.16);
+                osc.connect(gain); gain.connect(audioCtx.destination);
+                osc.start(now + i * 0.09); osc.stop(now + i * 0.09 + 0.16);
+            });
+        }
+
+        // --- UI 元素 ---
+        const btnConnect = document.getElementById('connectBtn');
+        const btnDisconnect = document.getElementById('disconnectBtn');
+        const btnCalibrate = document.getElementById('calibrateBtn');
+        const statusText = document.getElementById('statusText');
+        const scoreDisplay = document.getElementById('scoreDisplay');
+        const rawYawDisplay = document.getElementById('rawYawDisplay');
+        const rawPitchDisplay = document.getElementById('rawPitchDisplay');
+        
+        const gameArea = document.getElementById('gameArea');
+        const crosshair = document.getElementById('crosshair');
+        const calibrationOverlay = document.getElementById('calibrationOverlay');
+        const meaningDisplay = document.getElementById('meaningDisplay');
+        const englishDisplay = document.getElementById('englishDisplay');
+        const letterCountDisplay = document.getElementById('letterCountDisplay');
+        const answerSlots = document.getElementById('answerSlots');
+        const wordMessage = document.getElementById('wordMessage');
+        const repeatWordBtn = document.getElementById('repeatWordBtn');
+
+        // 初始化：將準心放在中央
+        function initCrosshair() {
+            targetCrosshairX = gameArea.clientWidth / 2;
+            targetCrosshairY = gameArea.clientHeight / 2;
+            crosshairX = targetCrosshairX;
+            crosshairY = targetCrosshairY;
+            updateCrosshairVisual();
+        }
+
+        // ==========================================
+        // 藍牙連線與資料處理
+        // ==========================================
+        function updateStatus(text, colorClass) {
+            statusText.textContent = text;
+            statusText.className = `font-bold text-sm truncate ${colorClass}`;
+        }
+
+        async function connectBluetooth() {
+            try {
+                updateStatus('尋找裝置...', 'text-yellow-500');
+                bluetoothDevice = await navigator.bluetooth.requestDevice({
+                    filters: [{ namePrefix: 'BBC micro:bit' }],
+                    optionalServices: [UART_SERVICE_UUID]
+                });
+                bluetoothDevice.addEventListener('gattserverdisconnected', onDisconnected);
+                updateStatus('連線中...', 'text-yellow-500');
+                
+                const server = await bluetoothDevice.gatt.connect();
+                const service = await server.getPrimaryService(UART_SERVICE_UUID);
+                const txCharacteristic = await service.getCharacteristic(UART_TX_CHARACTERISTIC_UUID);
+                
+                await txCharacteristic.startNotifications();
+                txCharacteristic.addEventListener('characteristicvaluechanged', handleDataReceived);
+
+                btnConnect.classList.add('hidden');
+                btnDisconnect.classList.remove('hidden');
+                btnCalibrate.disabled = false;
+                
+                updateStatus('✅ 連線成功', 'text-green-500');
+                
+                // 顯示請校正的畫面
+                calibrationOverlay.classList.remove('hidden');
+
+            } catch (error) {
+                console.error("藍牙連線錯誤:", error);
+                updateStatus('連線失敗', 'text-red-500');
+            }
+        }
+
+        function handleDataReceived(event) {
+            const value = event.target.value;
+            const decoder = new TextDecoder('utf-8');
+            dataBuffer += decoder.decode(value);
+
+            const lines = dataBuffer.split('\n');
+            dataBuffer = lines.pop(); // 保留不完整的片段
+
+            for (const line of lines) {
+                const dataArray = line.trim().split(',');
+                if (dataArray.length === 3) {
+                    rawPitch = parseInt(dataArray[0]);
+                    rawYaw = parseInt(dataArray[1]);
+                    const buttonState = parseInt(dataArray[2]);
+
+                    // 套用低通濾波器平滑資料
+                    // 處理 Yaw 跨越 0/360 的問題
+                    if (Math.abs(rawYaw - smoothedYaw) > 180) {
+                        if (rawYaw > smoothedYaw) smoothedYaw += 360;
+                        else smoothedYaw -= 360;
+                    }
+                    smoothedYaw = smoothedYaw * (1 - FILTER_ALPHA) + rawYaw * FILTER_ALPHA;
+                    if (smoothedYaw >= 360) smoothedYaw -= 360;
+                    if (smoothedYaw < 0) smoothedYaw += 360;
+                    
+                    smoothedPitch = smoothedPitch * (1 - FILTER_ALPHA) + rawPitch * FILTER_ALPHA;
+
+                    // 更新原始數據顯示 (這裡顯示濾波後的數值會更穩定)
+                    rawYawDisplay.textContent = Math.round(smoothedYaw);
+                    rawPitchDisplay.textContent = Math.round(smoothedPitch);
+
+                    // 如果已經校正，則計算目標準心位置 (不再直接移動，而是設定目標位置)
+                    if (isCalibrated) {
+                        calculateTargetPosition();
+                    }
+
+                    // 偵測開火 (偵測從 0 變 1 的瞬間，即 Rising Edge)
+                    if (buttonState === 1 && lastButtonState === 0 && isCalibrated) {
+                        fireWeapon();
+                    }
+                    lastButtonState = buttonState;
+                }
+            }
+        }
+
+        function onDisconnected() {
+            updateStatus('已斷線', 'text-gray-500');
+            btnConnect.classList.remove('hidden');
+            btnDisconnect.classList.add('hidden');
+            btnCalibrate.disabled = true;
+            isCalibrated = false;
+            crosshair.classList.add('hidden');
+            stopGame();
+            if(animationFrameId) cancelAnimationFrame(animationFrameId);
+        }
+
+        function disconnectBluetooth() {
+            if (bluetoothDevice && bluetoothDevice.gatt.connected) {
+                bluetoothDevice.gatt.disconnect();
+            }
+        }
+
+        // ==========================================
+        // 遊戲核心邏輯 (移動、射擊、生成標靶)
+        // ==========================================
+
+        // 準心校正
+        btnCalibrate.addEventListener('click', () => {
+            baseYaw = smoothedYaw; // 使用平滑後的資料進行校正
+            basePitch = smoothedPitch;
+            isCalibrated = true;
+            
+            calibrationOverlay.classList.add('hidden');
+            crosshair.classList.remove('hidden');
+            initCrosshair();
+            
+            if (!isGameRunning) startGame();
+        });
+
+        // 根據感測器資料計算準心的"目標"位置
+        function calculateTargetPosition() {
+            // 計算 Yaw 偏差 (需處理 359度 與 0度 的跨越問題)
+            let deltaYaw = smoothedYaw - baseYaw;
+            if (deltaYaw > 180) deltaYaw -= 360;
+            if (deltaYaw < -180) deltaYaw += 360;
+
+            // 計算 Pitch 偏差
+            let deltaPitch = smoothedPitch - basePitch;
+
+            // 計算目標 X, Y 座標 (以螢幕中心為基準)
+            const centerX = gameArea.clientWidth / 2;
+            const centerY = gameArea.clientHeight / 2;
+
+            // 將角度變動映射到螢幕像素
+            // 假設向右轉(Yaw變大)，X座標增加
+            let targetX = centerX + (deltaYaw * SENSITIVITY_X);
+            
+            // 處理上下反轉
+            let pitchMove = deltaPitch * SENSITIVITY_Y;
+            let targetY = INVERT_PITCH ? (centerY - pitchMove) : (centerY + pitchMove);
+
+            // 限制目標準心不能跑出邊界
+            targetCrosshairX = Math.max(0, Math.min(gameArea.clientWidth, targetX));
+            targetCrosshairY = Math.max(0, Math.min(gameArea.clientHeight, targetY));
+        }
+
+        // 使用 requestAnimationFrame 平滑地將準心移向目標位置
+        function updateCrosshairVisual() {
+            //            // 使用 Lerp (線性插值) 使移動更平滑
+            // 係數越小 (例如 0.15) 越平滑，越接近 1 越生硬
+            crosshairX += (targetCrosshairX - crosshairX) * 0.15;
+            crosshairY += (targetCrosshairY - crosshairY) * 0.15;
+
+            // 使用 transform 效能較好 
+            crosshair.style.left = `${crosshairX}px`;
+            crosshair.style.top = `${crosshairY}px`;
+            crosshair.style.margin = '0'; 
+            crosshair.style.transform = 'translate(-50%, -50%)';
+
+            // 繼續下一次動畫幀
+            if(isCalibrated) {
+                animationFrameId = requestAnimationFrame(updateCrosshairVisual);
+            }
+        }
+
+        // 開火邏輯
+        function fireWeapon() {
+            // 播放射擊音效
+            playShootSound();
+
+            // 產生開火視覺特效 (槍口火焰)
+            const flashEffect = document.createElement('div');
+            flashEffect.className = 'shoot-effect';
+            flashEffect.style.left = `${crosshairX}px`;
+            flashEffect.style.top = `${crosshairY}px`;
+            gameArea.appendChild(flashEffect);
+            
+            // 移除開火特效
+            setTimeout(() => {
+                if(flashEffect.parentNode) flashEffect.remove();
+            }, 150);
+
+
+            // 碰撞判定：檢查所有現存的標靶
+            const targets = document.querySelectorAll('.target');
+            const hitRadius = 42; // 字母方塊較大，放寬命中判定
+
+            let hitSomething = false;
+
+            targets.forEach(target => {
+                // 取得標靶的中心座標
+                const rect = target.getBoundingClientRect();
+                const gameRect = gameArea.getBoundingClientRect();
+                
+                // 轉換為 gameArea 內的相對座標
+                const targetX = (rect.left - gameRect.left) + (rect.width / 2);
+                const targetY = (rect.top - gameRect.top) + (rect.height / 2);
+
+                // 計算兩點距離 (畢氏定理)
+                const dx = crosshairX - targetX;
+                const dy = crosshairY - targetY;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+
+                if (distance < hitRadius) {
+                    // 擊中！
+                    hitTarget(target, targetX, targetY);
+                    hitSomething = true;
+                }
+            });
+
+            // --- 新增：射擊後重置準心與校正點 ---
+            
+            // 1. 更新基準點：將當下最新的平滑角度設為新的 (0,0) 原點
+            baseYaw = smoothedYaw;
+            basePitch = smoothedPitch;
+            
+            // 2. 重置目標座標：將目標位置設為畫面正中央
+            targetCrosshairX = gameArea.clientWidth / 2;
+            targetCrosshairY = gameArea.clientHeight / 2;
+            
+            // 3. (選擇性) 如果希望射擊後準心是「瞬間」回到中間，而非平滑飄回去，可以加上這兩行：
+            // crosshairX = targetCrosshairX;
+            // crosshairY = targetCrosshairY;
+
+            // 如果沒擊中，可以在這裡加落空音效或視覺特效
+        }
+
+        // 擊中字母的處理
+        function hitTarget(targetEl, x, y) {
+            if (roundLocked || targetEl.classList.contains('used')) return;
+
+            const letter = targetEl.dataset.letter;
+            targetEl.classList.add('used');
+            enteredLetters.push(letter);
+            updateAnswerSlots();
+
+            // 加分：每擊中一個字母 +10
+            score += 10;
+            scoreDisplay.textContent = score;
+            scoreDisplay.classList.add('text-white', 'scale-125');
+            setTimeout(() => scoreDisplay.classList.remove('text-white', 'scale-125'), 200);
+
+            const effect = document.createElement('div');
+            effect.className = 'hit-effect';
+            effect.style.left = `${x}px`;
+            effect.style.top = `${y}px`;
+            gameArea.appendChild(effect);
+            setTimeout(() => { if (effect.parentNode) effect.remove(); }, 300);
+
+            // 打滿題目要求的字母數才判定。
+            if (enteredLetters.length === currentWord.word.length) {
+                roundLocked = true;
+                const answer = enteredLetters.join('');
+
+                if (answer === currentWord.word) {
+                    playSuccessSound();
+                    wordMessage.textContent = `✅ 正確！${currentWord.word}　🎉 太棒了！`;
+                    wordMessage.className = 'text-sm min-h-[24px] text-emerald-400 font-bold';
+                    score += 30;
+                    scoreDisplay.textContent = score;
+
+                    // 成功後再念一次題目，例如「太陽，sun」，再給鼓勵，念完才進入下一題。
+                    setTimeout(() => {
+                        speakSuccessAndEncourage(() => startNewWord());
+                    }, 350);
+                } else {
+                    playErrorSound();
+                    wordMessage.textContent = `❌ ${answer} 不正確，再試一次！`;
+                    wordMessage.className = 'text-sm min-h-[24px] text-red-400 font-bold';
+                    setTimeout(() => {
+                        enteredLetters = [];
+                        updateAnswerSlots();
+                        shuffleChoicesAndRespawn();
+                        wordMessage.textContent = '六個字母已重新洗牌，請再試一次';
+                        wordMessage.className = 'text-sm min-h-[24px] text-sky-300';
+                        setTimeout(speakCurrentWord, 250);
+                        roundLocked = false;
+                    }, 850);
+                }
+            }
+        }
+
+        // ==========================================
+        // 標靶生成與遊戲流程
+        // ==========================================
+
+        function startGame() {
+            isGameRunning = true;
+            score = 0;
+            scoreDisplay.textContent = score;
+
+            if(isCalibrated && !animationFrameId) {
+                animationFrameId = requestAnimationFrame(updateCrosshairVisual);
+            }
+
+            document.querySelectorAll('.target').forEach(t => t.remove());
+            startNewWord();
+        }
+
+        function stopGame() {
+            isGameRunning = false;
+            document.querySelectorAll('.target').forEach(t => t.remove());
+            meaningDisplay.textContent = '等待開始';
+            englishDisplay.textContent = '---';
+            letterCountDisplay.textContent = '0';
+            answerSlots.innerHTML = '';
+            wordMessage.textContent = '連線並校正後開始';
+        }
+
+        function shuffleArray(arr) {
+            const copy = [...arr];
+            for (let i = copy.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [copy[i], copy[j]] = [copy[j], copy[i]];
+            }
+            return copy;
+        }
+
+        function makeSixChoices(word) {
+            const letters = [...new Set(word.split(''))];
+            const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+            const candidates = alphabet.filter(ch => !letters.includes(ch));
+            while (letters.length < 6) {
+                const pickIndex = Math.floor(Math.random() * candidates.length);
+                letters.push(candidates.splice(pickIndex, 1)[0]);
+            }
+            return shuffleArray(letters);
+        }
+
+        function startNewWord() {
+            if (!isGameRunning) return;
+
+            let next;
+            do {
+                next = WORD_BANK[Math.floor(Math.random() * WORD_BANK.length)];
+            } while (WORD_BANK.length > 1 && currentWord && next.word === currentWord.word);
+
+            currentWord = next;
+            enteredLetters = [];
+            roundLocked = false;
+            currentChoices = makeSixChoices(currentWord.word);
+
+            meaningDisplay.textContent = currentWord.meaning;
+            englishDisplay.textContent = currentWord.word;
+            letterCountDisplay.textContent = currentWord.word.length;
+            wordMessage.textContent = '依序射擊正確的字母';
+            wordMessage.className = 'text-sm min-h-[24px] text-sky-300';
+            updateAnswerSlots();
+            spawnAllLetters();
+
+            // 自動唸出「中文 + 英文單字」
+            setTimeout(speakCurrentWord, 250);
+        }
+
+        function updateAnswerSlots() {
+            if (!currentWord) return;
+            answerSlots.innerHTML = '';
+            for (let i = 0; i < currentWord.word.length; i++) {
+                const slot = document.createElement('div');
+                slot.className = 'answer-slot';
+                slot.textContent = enteredLetters[i] || '';
+                answerSlots.appendChild(slot);
+            }
+        }
+
+        function shuffleChoicesAndRespawn() {
+            currentChoices = shuffleArray(currentChoices);
+            spawnAllLetters();
+        }
+
+        function spawnAllLetters() {
+            if (!isGameRunning) return;
+            document.querySelectorAll('.target').forEach(t => t.remove());
+
+            const targetSize = window.innerWidth < 768 ? 54 : 64;
+            const padding = 24;
+            const topSafe = 18;
+            const positions = [];
+
+            currentChoices.forEach(letter => {
+                const target = document.createElement('div');
+                target.className = 'target letter-target absolute flex items-center justify-center font-black text-white cursor-crosshair';
+                target.dataset.letter = letter;
+                target.textContent = letter;
+
+                const maxX = Math.max(padding, gameArea.clientWidth - targetSize - padding);
+                const maxY = Math.max(topSafe, gameArea.clientHeight - targetSize - padding);
+
+                let x = padding, y = topSafe, attempts = 0;
+                do {
+                    x = padding + Math.random() * Math.max(1, maxX - padding);
+                    y = topSafe + Math.random() * Math.max(1, maxY - topSafe);
+                    attempts++;
+                } while (positions.some(p => Math.hypot(p.x - x, p.y - y) < 105) && attempts < 120);
+
+                positions.push({x, y});
+                target.style.left = `${x}px`;
+                target.style.top = `${y}px`;
+                gameArea.appendChild(target);
+            });
+        }
+
+        // 綁定事件
+        btnConnect.addEventListener('click', connectBluetooth);
+        btnDisconnect.addEventListener('click', disconnectBluetooth);
+        repeatWordBtn.addEventListener('click', speakCurrentWord);
+
+        // 初始化
+        initCrosshair();
+        window.addEventListener('resize', () => { initCrosshair(); if (isGameRunning) spawnAllLetters(); }); // 視窗縮放時重新置中並重排字母
+
+    </script>
+</body>
+</html>
